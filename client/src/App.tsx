@@ -4,8 +4,6 @@ import Editor from "@monaco-editor/react";
 import axios from "axios";
 import SimplePeer from "simple-peer";
 
-// PRO FIX: Use Environment Variable
-// If the variable is missing (e.g. locally without .env), default to localhost
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
 
 const socket: Socket = io(BACKEND_URL);
