@@ -40,6 +40,9 @@ function App() {
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [userCount, setUserCount] = useState<number>(0);
   const isRemoteUpdate = useRef(false);
+  
+  // Ref to store the Monaco Editor instance
+  const editorRef = useRef<any>(null);
 
   // Voice State
   const [peers, setPeers] = useState<PeerNode[]>([]);
@@ -74,7 +77,7 @@ function App() {
 
   const leaveRoom = () => {
     // disconnect socket room logic
-    socket.emit("leave_room"); // Ensure server handles this if needed, or just refresh
+    socket.emit("leave_room"); 
     // Reset State
     setJoined(false);
     setRoomId("");
@@ -94,6 +97,12 @@ function App() {
   };
 
   // --- Editor Logic ---
+  
+  // Capture the editor instance when it mounts
+  const handleEditorDidMount = (editor: any, monaco: any) => {
+    editorRef.current = editor;
+  };
+
   const handleEditorChange = (value: string | undefined) => {
     if (value !== undefined && !isRemoteUpdate.current) {
       setCode(value);
@@ -139,14 +148,10 @@ function App() {
   const toggleMute = () => {
     if (audioStream) {
       const track = audioStream.getAudioTracks()[0];
-      
       // 1. Toggle the hardware track
       track.enabled = !track.enabled;
-      
       // 2. Update the UI state to match
       setIsMuted(!track.enabled); 
-      
-      // Optional: Debugging log to check if Android "ended" the track
       console.log("Mic State:", track.enabled ? "Live" : "Muted", "ReadyState:", track.readyState);
     }
   };
@@ -184,9 +189,24 @@ function App() {
       setOutput(state.output);
     });
 
+    // UPDATED: Cursor preserving logic
     socket.on("receive_code", (newCode) => {
       isRemoteUpdate.current = true;
+      
+      // 1. Save current cursor position
+      const savedPos = editorRef.current?.getPosition();
+      
+      // 2. Update code
       setCode(newCode);
+
+      // 3. Restore cursor position (after a tiny delay to allow render)
+      if (savedPos && editorRef.current) {
+         setTimeout(() => {
+            editorRef.current.setPosition(savedPos);
+            // Optional: Scroll to cursor if needed, but setPosition usually handles it
+            editorRef.current.focus();
+         }, 50); // 50ms delay to ensure editor has re-rendered
+      }
     });
     
     socket.on("receive_language", (lang) => setLanguage(lang));
@@ -383,12 +403,14 @@ function App() {
 
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative z-0">
         <div className="flex-1 md:w-[70%] border-b md:border-b-0 md:border-r border-border-dim relative h-[50dvh] md:h-auto">
+           {/* UPDATED: Added onMount prop to capture editor instance */}
            <Editor
             height="100%"
             language={language}
             theme="vs-dark"
             value={code}
             onChange={handleEditorChange}
+            onMount={handleEditorDidMount} 
             options={{ minimap: { enabled: false }, fontSize: 14, padding: { top: 20 }, fontFamily: 'Fira Code, monospace', automaticLayout: true }}
            />
         </div>
