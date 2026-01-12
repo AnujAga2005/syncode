@@ -4,12 +4,24 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 
 const app = express();
-app.use(cors());
+
+// SECURITY FIX: Allow only your specific Frontend URL in production.
+// If FRONTEND_URL is not set (e.g. on localhost), it falls back to "*"
+const ALLOWED_ORIGIN = process.env.FRONTEND_URL || "*";
+
+app.use(cors({
+    origin: ALLOWED_ORIGIN,
+    methods: ["GET", "POST"],
+    credentials: true
+}));
 
 const server = http.createServer(app);
 
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: { 
+        origin: ALLOWED_ORIGIN, 
+        methods: ["GET", "POST"] 
+    }
 });
 
 interface RoomData {
@@ -46,7 +58,7 @@ io.on("connection", (socket) => {
         io.to(socket.id).emit("sync_state", roomData);
     });
 
-    // --- Voice Signaling (Fixed) ---
+    // --- Voice Signaling ---
     socket.on("request_users", (roomId) => {
         // Send the list of *other* users to the requester
         const clients = Array.from(io.sockets.adapter.rooms.get(roomId) || []);
@@ -105,6 +117,8 @@ io.on("connection", (socket) => {
     });
 });
 
+// Render automatically injects the PORT environment variable.
+// We must listen on THIS port, not a hardcoded one.
 const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, () => {
