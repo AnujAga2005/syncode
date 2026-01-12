@@ -8,10 +8,6 @@ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3001";
 
 const socket: Socket = io(BACKEND_URL);
 
-type PistonResponse = {
-  run: { stdout: string; stderr: string; output: string; code: number; };
-};
-
 interface PeerNode {
   peerID: string;
   peer: SimplePeer.Instance;
@@ -34,14 +30,17 @@ function App() {
   const [joined, setJoined] = useState<boolean>(false);
   
   const [language, setLanguage] = useState<string>("javascript");
+  // We keep 'code' state ONLY for the "Run" and "Save" buttons.
+  // We do NOT pass this to the Editor's value prop anymore.
   const [code, setCode] = useState<string>(CODE_TEMPLATES.javascript);
   const [output, setOutput] = useState<string[]>(["Ready to execute..."]);
   
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [userCount, setUserCount] = useState<number>(0);
-  const isRemoteUpdate = useRef(false);
   
-  // Ref to store the Monaco Editor instance
+  // Ref to track if the change came from the socket
+  const isRemoteUpdate = useRef(false);
+  // Ref to access the Monaco Editor instance directly
   const editorRef = useRef<any>(null);
 
   // Voice State
@@ -51,14 +50,13 @@ function App() {
   const [voiceActive, setVoiceActive] = useState<boolean>(false);
   const peersRef = useRef<PeerNode[]>([]);
 
-  // --- 1. PERSISTENCE LOGIC (Fixes Refresh Issue) ---
+  // --- 1. PERSISTENCE LOGIC ---
   useEffect(() => {
-    // Check URL query params on mount
     const params = new URLSearchParams(window.location.search);
     const roomFromUrl = params.get("room");
     if (roomFromUrl) {
       setRoomId(roomFromUrl);
-      joinRoom(roomFromUrl, false); // false = don't update URL again
+      joinRoom(roomFromUrl, false);
     }
   }, []);
 
@@ -76,9 +74,7 @@ function App() {
   };
 
   const leaveRoom = () => {
-    // disconnect socket room logic
-    socket.emit("leave_room"); 
-    // Reset State
+    socket.emit("leave_room");
     setJoined(false);
     setRoomId("");
     setPeers([]);
@@ -87,9 +83,8 @@ function App() {
         audioStream.getTracks().forEach(track => track.stop());
         setAudioStream(null);
     }
-    // Clear URL
     window.history.pushState({}, "", window.location.pathname);
-    window.location.reload(); // Force reload to ensure clean socket state
+    window.location.reload();
   };
 
   const generateRoomId = () => {
@@ -98,17 +93,24 @@ function App() {
 
   // --- Editor Logic ---
   
-  // Capture the editor instance when it mounts
+  // 1. Capture the editor instance
   const handleEditorDidMount = (editor: any, monaco: any) => {
     editorRef.current = editor;
   };
 
+  // 2. Handle Local Changes (User Typing)
   const handleEditorChange = (value: string | undefined) => {
-    if (value !== undefined && !isRemoteUpdate.current) {
-      setCode(value);
-      socket.emit("code_change", { roomId, code: value });
+    // If this change was triggered by a socket update, ignore it
+    if (isRemoteUpdate.current) {
+        isRemoteUpdate.current = false;
+        return;
     }
-    isRemoteUpdate.current = false;
+
+    // Otherwise, it's a real user keypress
+    if (value !== undefined) {
+      setCode(value); // Update state for 'Run' button
+      socket.emit("code_change", { roomId, code: value }); // Send to others
+    }
   };
 
   const handleLanguageChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -116,23 +118,21 @@ function App() {
     setLanguage(newLang);
     socket.emit("language_change", { roomId, language: newLang });
 
-    const currentCode = code.trim();
-    const isComment = currentCode.startsWith("//") || currentCode.startsWith("#");
-    
-    if (currentCode === "" || isComment) {
-        const newCode = CODE_TEMPLATES[newLang as keyof typeof CODE_TEMPLATES];
-        setCode(newCode);
-        socket.emit("code_change", { roomId, code: newCode });
+    // Update the template in the editor
+    const newCode = CODE_TEMPLATES[newLang as keyof typeof CODE_TEMPLATES];
+    if (editorRef.current) {
+        editorRef.current.setValue(newCode);
     }
+    setCode(newCode);
+    socket.emit("code_change", { roomId, code: newCode });
   };
 
-  // --- Voice Logic (Enhanced) ---
+  // --- Voice Logic ---
   const startVoice = () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       alert("Microphone blocked. Ensure you are using HTTPS (Ngrok).");
       return;
     }
-
     navigator.mediaDevices.getUserMedia({ video: false, audio: true })
       .then(stream => {
         setAudioStream(stream);
@@ -148,15 +148,11 @@ function App() {
   const toggleMute = () => {
     if (audioStream) {
       const track = audioStream.getAudioTracks()[0];
-      // 1. Toggle the hardware track
       track.enabled = !track.enabled;
-      // 2. Update the UI state to match
       setIsMuted(!track.enabled); 
-      console.log("Mic State:", track.enabled ? "Live" : "Muted", "ReadyState:", track.readyState);
     }
   };
 
-  // STUN Config is CRITICAL for mobile-to-laptop connection
   const createPeer = (userToSignal: string, callerID: string, stream: MediaStream) => {
     const peer = new SimplePeer({
       initiator: true,
@@ -183,30 +179,40 @@ function App() {
   // --- Effects ---
   useEffect(() => {
     socket.on("sync_state", (state) => {
-      isRemoteUpdate.current = true;
+      // Initial Sync
+      if (editorRef.current) {
+          isRemoteUpdate.current = true;
+          editorRef.current.setValue(state.code);
+      }
       setCode(state.code);
       setLanguage(state.language);
       setOutput(state.output);
     });
 
-    // UPDATED: Cursor preserving logic
+    // --- KEY FIX FOR CURSOR JUMPING ---
     socket.on("receive_code", (newCode) => {
-      isRemoteUpdate.current = true;
+      if (!editorRef.current) return;
       
-      // 1. Save current cursor position
-      const savedPos = editorRef.current?.getPosition();
-      
-      // 2. Update code
-      setCode(newCode);
+      const currentVal = editorRef.current.getValue();
+      if (newCode === currentVal) return; // Ignore if identical
 
-      // 3. Restore cursor position (after a tiny delay to allow render)
-      if (savedPos && editorRef.current) {
-         setTimeout(() => {
-            editorRef.current.setPosition(savedPos);
-            // Optional: Scroll to cursor if needed, but setPosition usually handles it
-            editorRef.current.focus();
-         }, 50); // 50ms delay to ensure editor has re-rendered
+      // 1. Mark as remote update so 'onChange' doesn't broadcast it back
+      isRemoteUpdate.current = true;
+
+      // 2. Save Cursor Position
+      const cursorPosition = editorRef.current.getPosition();
+
+      // 3. Update the Editor Content DIRECTLY (Bypassing React State)
+      //    setValue is synchronous in Monaco
+      editorRef.current.setValue(newCode);
+
+      // 4. Restore Cursor Position IMMEDIATELY
+      if (cursorPosition) {
+          editorRef.current.setPosition(cursorPosition);
       }
+
+      // 5. Update the hidden React state for "Run/Save" buttons
+      setCode(newCode);
     });
     
     socket.on("receive_language", (lang) => setLanguage(lang));
@@ -287,42 +293,17 @@ function App() {
   };
 
   const AudioElement = ({ peer }: { peer: SimplePeer.Instance }) => {
-  const ref = useRef<HTMLAudioElement>(null);
-
-  useEffect(() => {
-    peer.on("stream", (stream) => {
-      if (ref.current) {
-        ref.current.srcObject = stream;
-        // Force play immediately
-        ref.current.play().catch(console.error);
-      }
-    });
-
-    // LISTENER: If the audio pauses (because of silence), force it to play again
-    const handlePause = () => {
-        if (ref.current && !ref.current.ended) {
-            console.log("Audio paused unexpectedly, resuming...");
-            ref.current.play().catch(console.error);
+    const ref = useRef<HTMLAudioElement>(null);
+    useEffect(() => {
+      peer.on("stream", (stream) => {
+        if (ref.current) {
+          ref.current.srcObject = stream;
+          ref.current.play().catch(console.error);
         }
-    };
-
-    const audioEl = ref.current;
-    audioEl?.addEventListener("pause", handlePause);
-    
-    return () => {
-        audioEl?.removeEventListener("pause", handlePause);
-    };
-  }, [peer]);
-
-  return (
-      <audio 
-        playsInline 
-        autoPlay 
-        ref={ref} 
-        controls={false} // Hide controls
-      />
-  );
-};
+      });
+    }, [peer]);
+    return <audio playsInline autoPlay ref={ref} controls={false} />;
+  };
 
   if (!joined) {
     return (
@@ -349,7 +330,6 @@ function App() {
       {peers.map((p) => <AudioElement key={p.peerID} peer={p.peer} />)}
 
       <header className="relative z-50 bg-surface border-b border-border-dim flex flex-col md:flex-row md:items-center px-4 py-3 gap-3 md:justify-between shrink-0">
-        
         <div className="flex items-center justify-between md:justify-start gap-4">
           <div className="flex items-center gap-4">
             <h1 className="text-xl font-bold">SyncCode</h1>
@@ -358,59 +338,38 @@ function App() {
               <span className="text-xs bg-charcoal px-2 py-1 rounded border border-border-dim text-gray-400">👥 {userCount}</span>
             </div>
           </div>
-          
-          <button 
-             onClick={leaveRoom}
-             className="text-xs font-semibold bg-red-900/20 text-red-400 border border-red-900 px-3 py-1 rounded hover:bg-red-900/40 transition-all md:hidden"
-          >
-            Leave
-          </button>
+          <button onClick={leaveRoom} className="md:hidden text-xs text-red-400 border border-red-900 px-3 py-1 rounded">Leave</button>
         </div>
         
         <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0 scrollbar-hide">
            {!voiceActive ? (
-            <button onClick={startVoice} className="whitespace-nowrap text-sm font-semibold flex items-center gap-1 bg-green-900/30 text-green-400 px-4 py-2 rounded border border-green-900 hover:bg-green-900/50 transition-all">
-                🎙️ Voice
-            </button>
+            <button onClick={startVoice} className="whitespace-nowrap text-sm font-semibold flex items-center gap-1 bg-green-900/30 text-green-400 px-4 py-2 rounded border border-green-900 hover:bg-green-900/50 transition-all">🎙️ Voice</button>
           ) : (
-             <button onClick={toggleMute} className={`whitespace-nowrap text-sm font-semibold flex items-center gap-1 px-4 py-2 rounded border transition-all ${isMuted ? 'bg-red-900/30 text-red-400 border-red-900' : 'bg-green-900/30 text-green-400 border-green-900 animate-pulse'}`}>
-                {isMuted ? '🔇 Muted' : '🗣️ Live'}
-            </button>
+             <button onClick={toggleMute} className={`whitespace-nowrap text-sm font-semibold flex items-center gap-1 px-4 py-2 rounded border transition-all ${isMuted ? 'bg-red-900/30 text-red-400 border-red-900' : 'bg-green-900/30 text-green-400 border-green-900 animate-pulse'}`}>{isMuted ? '🔇 Muted' : '🗣️ Live'}</button>
           )}
 
-          <select value={language} onChange={handleLanguageChange} className="bg-charcoal border border-border-dim text-sm text-gray-300 rounded px-3 py-2 focus:outline-none focus:border-accent">
+          <select value={language} onChange={handleLanguageChange} className="bg-charcoal border border-border-dim text-sm text-gray-300 rounded px-3 py-2">
             <option value="javascript">JS</option>
             <option value="python">Py</option>
             <option value="java">Java</option>
           </select>
           
-          <button onClick={downloadCode} className="text-sm font-medium bg-charcoal border border-border-dim text-gray-300 px-4 py-2 rounded hover:bg-gray-800 hover:text-white transition-all flex items-center gap-2">
-             Save
-          </button>
-
-          <button onClick={runCode} disabled={isRunning} className={`whitespace-nowrap px-6 py-2 rounded text-sm font-semibold transition-all flex items-center gap-2 ${isRunning ? 'bg-gray-600' : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/20'}`}>
-            {isRunning ? '...' : '▶ Run'}
-          </button>
-          
-          <button 
-             onClick={leaveRoom}
-             className="hidden md:block text-xs font-semibold bg-red-900/20 text-red-400 border border-red-900 px-3 py-2 rounded hover:bg-red-900/40 transition-all ml-2"
-          >
-            Leave
-          </button>
+          <button onClick={downloadCode} className="text-sm font-medium bg-charcoal border border-border-dim text-gray-300 px-4 py-2 rounded hover:bg-gray-800">Save</button>
+          <button onClick={runCode} disabled={isRunning} className={`whitespace-nowrap px-6 py-2 rounded text-sm font-semibold transition-all ${isRunning ? 'bg-gray-600' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}>{isRunning ? '...' : '▶ Run'}</button>
+          <button onClick={leaveRoom} className="hidden md:block text-xs font-semibold bg-red-900/20 text-red-400 border border-red-900 px-3 py-2 rounded ml-2">Leave</button>
         </div>
       </header>
 
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative z-0">
         <div className="flex-1 md:w-[70%] border-b md:border-b-0 md:border-r border-border-dim relative h-[50dvh] md:h-auto">
-           {/* UPDATED: Added onMount prop to capture editor instance */}
+           {/* IMPORTANT: defaultValue is used, NOT value. This effectively uncouples React state from Editor view */}
            <Editor
             height="100%"
             language={language}
             theme="vs-dark"
-            value={code}
-            onChange={handleEditorChange}
+            defaultValue={code} 
             onMount={handleEditorDidMount} 
+            onChange={handleEditorChange}
             options={{ minimap: { enabled: false }, fontSize: 14, padding: { top: 20 }, fontFamily: 'Fira Code, monospace', automaticLayout: true }}
            />
         </div>
