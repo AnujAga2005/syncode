@@ -33,7 +33,7 @@ function App() {
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [userCount, setUserCount] = useState<number>(0);
   
-  // Logic Refs
+  // LOGIC: Refs for simultaneous editing
   const isRemoteUpdate = useRef(false);
   const editorRef = useRef<any>(null);
 
@@ -81,21 +81,24 @@ function App() {
 
   const generateRoomId = () => setRoomId(crypto.randomUUID().slice(0, 8));
 
-  // --- NEW EDITOR LOGIC (Simultaneous Typing) ---
+  // --- LOGIC: SIMULTANEOUS EDITING FIX ---
   const handleEditorDidMount = (editor: any, monaco: any) => {
     editorRef.current = editor;
 
-    // Listen for changes
+    // Listen for granular changes (Deltas)
     editor.onDidChangeModelContent((event: any) => {
-        if (isRemoteUpdate.current) return;
+        // If this change came from the socket, IGNORE IT (don't send it back)
+        if (isRemoteUpdate.current) { 
+            return; 
+        }
 
         const currentCode = editor.getValue();
-        setCode(currentCode); // Sync React state for Run button
+        setCode(currentCode); // Update React state for Run/Save buttons
 
-        // Send Delta (Small change) + Full Code (Backup)
+        // Send the specific change (delta) AND the full code (for backup)
         socket.emit("code_change", { 
             roomId, 
-            delta: event.changes, 
+            delta: event.changes, // This allows simultaneous typing!
             code: currentCode 
         });
     });
@@ -111,7 +114,7 @@ function App() {
     socket.emit("code_change", { roomId, code: newCode, delta: null });
   };
 
-  // --- SOCKETS ---
+  // --- SOCKET LISTENERS ---
   useEffect(() => {
     socket.on("sync_state", (state) => {
       isRemoteUpdate.current = true;
@@ -122,6 +125,7 @@ function App() {
       setTimeout(() => { isRemoteUpdate.current = false; }, 100);
     });
 
+    // LOGIC: Apply Deltas specifically
     socket.on("receive_code", (payload) => {
       if (!editorRef.current) return;
 
@@ -226,9 +230,8 @@ function App() {
     return <audio playsInline autoPlay ref={ref} controls={false} />;
   };
 
-  // --- RENDER ---
+  // --- UI: FULL ORIGINAL DESIGN RESTORED ---
   if (!joined) {
-    // RESTORED: Original Landing Page UI
     return (
       <div className="min-h-[100dvh] flex items-center justify-center bg-midnight text-white p-4">
         <div className="bg-surface p-8 rounded-xl shadow-2xl border border-border-dim w-full max-w-md text-center">
@@ -248,7 +251,6 @@ function App() {
     );
   }
 
-  // RESTORED: Original Header UI (User Count, Colors, Layout)
   return (
     <div className="h-[100dvh] flex flex-col bg-midnight text-white overflow-hidden">
       {peers.map((p) => <AudioElement key={p.peerID} peer={p.peer} />)}
@@ -260,7 +262,6 @@ function App() {
             <h1 className="text-xl font-bold">SyncCode</h1>
             <div className="flex items-center gap-2">
               <span className="text-xs bg-charcoal px-2 py-1 rounded border border-border-dim text-gray-400">ID: {roomId}</span>
-              {/* RESTORED: User Count Badge */}
               <span className="text-xs bg-charcoal px-2 py-1 rounded border border-border-dim text-gray-400">👥 {userCount}</span>
             </div>
           </div>
@@ -309,12 +310,12 @@ function App() {
 
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative z-0">
         <div className="flex-1 md:w-[70%] border-b md:border-b-0 md:border-r border-border-dim relative h-[50dvh] md:h-auto">
-           {/* LOGIC FIX: Uncontrolled Editor with onMount listener */}
+           {/* LOGIC: Editor uses onMount to capture refs and ignores React 'value' prop to prevent re-renders */}
            <Editor
             height="100%"
             language={language}
             theme="vs-dark"
-            defaultValue={code} // Use defaultValue, not value
+            defaultValue={code} 
             onMount={handleEditorDidMount}
             options={{ minimap: { enabled: false }, fontSize: 14, padding: { top: 20 }, fontFamily: 'Fira Code, monospace', automaticLayout: true }}
            />
