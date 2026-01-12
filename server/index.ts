@@ -75,10 +75,17 @@ io.on("connection", (socket) => {
     });
 
     // --- Editor Events ---
-    socket.on("code_change", ({ roomId, code }) => {
+    
+    // UPDATED: Now handles 'delta' to allow simultaneous typing
+    socket.on("code_change", ({ roomId, code, delta }) => {
         if (rooms.has(roomId)) {
+            // Update the server's master copy (for new users who join later)
             rooms.get(roomId)!.code = code;
-            socket.to(roomId).emit("receive_code", code);
+            
+            // Broadcast the change to everyone else in the room
+            // We send 'delta' so they can update just that part
+            // We send 'code' as a backup/sync mechanism
+            socket.to(roomId).emit("receive_code", { code, delta });
         }
     });
 
