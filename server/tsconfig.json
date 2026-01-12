@@ -9,9 +9,9 @@
     "types": ["node"],
     "sourceMap": true,
     "strict": false,
-    "esModuleInterop": true,  
+    "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["index.ts"],
-  "exclude": ["node_modules"]
+  "include": ["**/*.ts"], 
+  "exclude": ["node_modules", "dist"]
 }
